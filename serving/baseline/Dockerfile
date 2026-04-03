@@ -1,4 +1,4 @@
-# Base image with Python (like lab's Dockerfile)
+# Base image with Python 
 FROM python:3.11-slim
 
 # Set working directory inside the container
@@ -14,5 +14,5 @@ COPY app.py .
 # Expose port 8000 for FastAPI
 EXPOSE 8000
 
-# Start the FastAPI server (like lab used uvicorn)
+# Start the FastAPI server (like the lab used uvicorn)
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
