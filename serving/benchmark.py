@@ -1,7 +1,7 @@
 """
 Benchmark script for recommendation serving options.
 This script sends a series of requests to the FastAPI 
-recommendation endpoint and measures latency and throughput.
+recommendation endpoint and measures latency & throughput.
 """
 
 import requests
