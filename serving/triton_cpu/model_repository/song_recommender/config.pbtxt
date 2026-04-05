@@ -2,6 +2,7 @@
 # Difference from triton_gpu: KIND_CPU instead of KIND_GPU
 name: "song_recommender"
 platform: "onnxruntime_onnx"
+max_batch_size: 32
 
 input [
   {
@@ -28,7 +29,6 @@ instance_group [
 ]
 
 # Dynamic batching — groups requests arriving within 5ms into one batch
-# This is the main benefit of Triton over FastAPI
 dynamic_batching {
   max_queue_delay_microseconds: 5000
 }
