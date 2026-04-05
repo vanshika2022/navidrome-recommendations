@@ -1,0 +1,14 @@
+# One-time ONNX export container
+# Run this once to generate the ONNX model file for Triton.
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+RUN pip install --no-cache-dir torch numpy onnxscript onnx
+
+COPY export_onnx.py .
+
+# Create output directory
+RUN mkdir -p model_repository/song_recommender/1
+
+CMD ["python", "export_onnx.py"]
