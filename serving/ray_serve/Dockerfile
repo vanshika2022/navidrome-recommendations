@@ -7,8 +7,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY run_serve.py .
 
 EXPOSE 8000
 
-# Ray Serve starts its own HTTP server on port 8000
-CMD ["serve", "run", "app:app"]
+CMD ["python", "run_serve.py"]
