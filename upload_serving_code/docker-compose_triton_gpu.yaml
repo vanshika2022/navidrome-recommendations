@@ -1,0 +1,20 @@
+# Triton GPU serving (adapted from lab's docker-compose-triton.yaml)
+services:
+
+  # Triton Inference Server (replaces FastAPI entirely)
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Metrics
+    volumes:
+      - ./model_repository:/models
+    command: ["tritonserver", "--model-repository=/models"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,17 @@
+# Docker Compose starts both containers together
+# Same pattern as lab's docker-compose-fastapi.yaml
+services:
+
+  # Your FastAPI recommendation server
+  faiss-cached:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  # Redis cache — stores recommendation results in memory
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
