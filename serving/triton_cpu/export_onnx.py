@@ -93,19 +93,22 @@ class GRU4RecEncoder(nn.Module):
 
 if __name__ == "__main__":
     # Check multiple locations for the checkpoint (local dev vs Docker)
-    for candidate in [
-        Path(__file__).resolve().parents[2] / "artifacts" / "best_gru4rec.pt",  # local
-        Path("/app/artifacts/best_gru4rec.pt"),                                  # Docker
-    ]:
+    candidates = [Path("/app/artifacts/best_gru4rec.pt")]  # Docker
+    script_path = Path(__file__).resolve()
+    if len(script_path.parents) > 2:
+        candidates.insert(0, script_path.parents[2] / "artifacts" / "best_gru4rec.pt")  # local
+
+    ckpt_path = None
+    for candidate in candidates:
         if candidate.exists():
             ckpt_path = candidate
             break
-    else:
+    if ckpt_path is None:
         print("ERROR: best_gru4rec.pt not found", file=sys.stderr)
         sys.exit(1)
 
-    out_dir = Path(__file__).resolve().parent / "model_repository" / "gru4rec_encoder" / "1"
-    # Also check Docker path
+    # Output directory
+    out_dir = script_path.parent / "model_repository" / "gru4rec_encoder" / "1"
     if not out_dir.parent.parent.exists():
         out_dir = Path("/app/model_repository/gru4rec_encoder/1")
     out_dir.mkdir(parents=True, exist_ok=True)
