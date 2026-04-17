@@ -137,7 +137,7 @@ if __name__ == "__main__":
             "prefix_item_idxs": {0: "batch_size", 1: "seq_len"},
             "session_repr": {0: "batch_size"},
         },
-        dynamo=False,  # use legacy tracer — handles dynamic seq_len
+        **({} if torch.__version__ < "2.5" else {"dynamo": False}),  # legacy tracer for dynamic seq_len
     )
     print(f"Exported: {onnx_path}")
 
