@@ -1,98 +1,20 @@
 {
-  "user_id": "user_42",
+  "_schema_version": "1.0",
+  "_description": "One inference response from GRU4Rec serving. item_idx is the 1-based vocab index; track_id is the original 30Music track ID (idx2item lookup). rank is 1-based. score is the model's raw dot-product logit (pre-softmax; higher = more likely next track). request_id echoes back x-request-id header or a server-generated uuid. oov_count reports how many items in the incoming prefix_item_idxs were dropped as out-of-vocab before inference.",
+
+  "session_id": "287144",
+  "request_id": "8cfee79d-f487-4225-af7b-39164b8667c2",
+
   "recommendations": [
-    {
-      "song_id": "song_334ab",
-      "title": "Under the Bridge",
-      "artist": "Red Hot Chili Peppers",
-      "album": "Blood Sugar Sex Magik",
-      "genre": "rock",
-      "score": 0.9421,
-      "method": "collaborative_filtering"
-    },
-    {
-      "song_id": "song_891cd",
-      "title": "Creep",
-      "artist": "Radiohead",
-      "album": "Pablo Honey",
-      "genre": "alternative",
-      "score": 0.9108,
-      "method": "hybrid"
-    },
-    {
-      "song_id": "song_004ef",
-      "title": "Black Hole Sun",
-      "artist": "Soundgarden",
-      "album": "Superunknown",
-      "genre": "rock",
-      "score": 0.8973,
-      "method": "collaborative_filtering"
-    },
-    {
-      "song_id": "song_217gh",
-      "title": "Come As You Are",
-      "artist": "Nirvana",
-      "album": "Nevermind",
-      "genre": "alternative",
-      "score": 0.8815,
-      "method": "content_based"
-    },
-    {
-      "song_id": "song_553ij",
-      "title": "Everlong",
-      "artist": "Foo Fighters",
-      "album": "The Colour and the Shape",
-      "genre": "rock",
-      "score": 0.8742,
-      "method": "collaborative_filtering"
-    },
-    {
-      "song_id": "song_092kl",
-      "title": "Yellow",
-      "artist": "Coldplay",
-      "album": "Parachutes",
-      "genre": "alternative",
-      "score": 0.8601,
-      "method": "hybrid"
-    },
-    {
-      "song_id": "song_771mn",
-      "title": "With or Without You",
-      "artist": "U2",
-      "album": "The Joshua Tree",
-      "genre": "rock",
-      "score": 0.8499,
-      "method": "collaborative_filtering"
-    },
-    {
-      "song_id": "song_438op",
-      "title": "Mr. Brightside",
-      "artist": "The Killers",
-      "album": "Hot Fuss",
-      "genre": "alternative",
-      "score": 0.8344,
-      "method": "hybrid"
-    },
-    {
-      "song_id": "song_125qr",
-      "title": "Seven Nation Army",
-      "artist": "The White Stripes",
-      "album": "Elephant",
-      "genre": "rock",
-      "score": 0.8271,
-      "method": "collaborative_filtering"
-    },
-    {
-      "song_id": "song_662st",
-      "title": "Knights of Cydonia",
-      "artist": "Muse",
-      "album": "Black Holes and Revelations",
-      "genre": "rock",
-      "score": 0.8188,
-      "method": "hybrid"
-    }
+    {"rank": 1, "item_idx": 510595, "track_id": "2460503", "score": 2.5262},
+    {"rank": 2, "item_idx": 362144, "track_id": "4698874", "score": 2.2900},
+    {"rank": 3, "item_idx": 616479, "track_id":  "838286", "score": 2.2872},
+    {"rank": 4, "item_idx": 333366, "track_id": "2588097", "score": 2.1850},
+    {"rank": 5, "item_idx": 292221, "track_id":  "455834", "score": 2.0626}
   ],
-  "model_version": "v0.1.0-dummy",
-  "generated_at": "2026-04-01T10:30:00.412Z",
-  "inference_latency_ms": 42.7
+
+  "model_version":        "best_gru4rec-adapter",
+  "generated_at":         "2026-04-15T19:29:28Z",
+  "inference_latency_ms": 132.00,
+  "oov_count":            0
 }

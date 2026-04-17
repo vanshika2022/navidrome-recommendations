@@ -14,7 +14,16 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 FASTAPI_URL = "http://localhost:8000/recommend"
-payload = {"user_id": "user_42", "n_recommendations": 10}
+payload = {
+    "session_id": "bench_001",
+    "user_id": 44361,
+    "user_idx": 1,
+    "prefix_track_ids": [4698874, 838286, 2588097, 455834, 2460503],
+    "prefix_item_idxs": [1, 2, 3, 4, 5],
+    "playratios": [0.1, 1.0, 1.0, 1.0, 0.18],
+    "exclude_item_idxs": [1, 2, 3, 4, 5],
+    "top_n": 20,
+}
 
 
 def send_request():

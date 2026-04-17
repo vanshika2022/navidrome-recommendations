@@ -1,14 +1,18 @@
 {
-  "user_id": "user_42",
-  "n_recommendations": 10,
-  "context": {
-    "current_song_id": "song_12ghi",
-    "session_history": ["song_78abc", "song_91def", "song_12ghi"],
-    "timestamp": "2026-04-01T10:30:00Z"
-  },
-  "user_features": {
-    "favorite_genres": ["rock", "alternative"],
-    "avg_session_length_mins": 45.2,
-    "total_plays": 1823
-  }
+  "_schema_version": "1.0",
+  "_description": "One inference request for GRU4Rec. prefix_item_idxs are vocab-mapped (1-based) track indices built by build_vocabs(). prefix_track_ids are the original 30Music track IDs from sessions.idomaar. playratios are per-track play ratios from the sessions objects array. exclude_item_idxs masks out already-heard tracks from recommendations.",
+
+  "session_id": "287144",
+  "user_id": 44361,
+  "user_idx": 1,
+  "request_timestamp": "2014-01-20T10:37:31Z",
+
+  "prefix_track_ids":  [4698874, 838286, 2588097, 455834, 2460503],
+  "prefix_item_idxs":  [1, 2, 3, 4, 5],
+
+  "playratios":        [0.1, 1.0, 1.0, 1.0, 0.18],
+
+  "exclude_item_idxs": [1, 2, 3, 4, 5],
+
+  "top_n": 20
 }
