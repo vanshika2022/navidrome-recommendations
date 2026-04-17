@@ -11,7 +11,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir torch==2.1.2 numpy==1.26.4 onnx==1.15.0 onnxruntime==1.17.0 onnxscript
+RUN pip install --no-cache-dir torch==2.1.2 numpy==1.26.4 onnx==1.17.0 onnxruntime==1.17.0 onnxscript
 
 COPY serving/_shared/ _shared/
 COPY serving/triton_cpu/export_onnx.py .
