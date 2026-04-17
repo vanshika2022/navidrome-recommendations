@@ -1,0 +1,56 @@
+# Triton config for GRU4Rec session encoder (ONNX backend)
+#
+# This model takes a padded sequence of item indices and returns
+# a 128-dim session representation vector. The downstream service
+# handles the dot product against all item embeddings + top-k.
+#
+# Input:  prefix_item_idxs — 1D sequence of vocab indices (1-based, variable length)
+# Output: session_repr     — 128-dim session embedding vector
+#
+# See Ch7 §7.4.1: we separate the neural network inference (Triton)
+# from the application logic (FastAPI), so we can scale them independently.
+
+name: "gru4rec_encoder"
+backend: "onnxruntime"
+max_batch_size: 16
+
+input [
+  {
+    name: "prefix_item_idxs"
+    data_type: TYPE_INT64
+    dims: [ -1 ]  # variable-length sequence
+  }
+]
+
+output [
+  {
+    name: "session_repr"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  }
+]
+
+# Start with 1 instance on GPU 0. We'll scale this up during
+# benchmarking to measure the effect (Ch7 §7.4.4).
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Dynamic batching: when requests queue up, batch them together
+# instead of serving one-by-one. This is the key optimization
+# from the lab — absorbs bursty traffic without overprovisioning.
+#
+# preferred_batch_size: Triton will try to form batches of these sizes.
+# max_queue_delay_microseconds: how long to wait for more requests
+#   before sending an incomplete batch. 100μs is aggressive (low latency);
+#   increase for higher throughput at the cost of tail latency.
+#
+# See Ch7 §7.4.3 and the lab's dynamic batching section.
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 100
+}

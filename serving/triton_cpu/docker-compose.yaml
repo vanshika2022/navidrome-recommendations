@@ -1,11 +1,64 @@
-# Triton CPU serving (no GPU needed)
+# Docker compose for GRU4Rec serving with Triton + FastAPI wrapper
+#
+# Architecture (matches Ch7 §7.4.1 — separation of concerns):
+#   Client → FastAPI (app logic, vocab, dot product, top-k)
+#            → Triton (GRU encoder, ONNX backend, dynamic batching)
+#
+# On Chameleon, run:
+#   docker compose up -d
+#   docker logs triton_server -f   # wait for READY
+#
+# Then benchmark with perf_analyzer or benchmark_triton.py
+
 services:
-  triton:
+
+  # Triton Inference Server — serves the ONNX GRU encoder
+  triton_server:
     image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: triton_server
     ports:
-      - "8000:8000"   # HTTP
-      - "8001:8001"   # gRPC
-      - "8002:8002"   # Metrics
+      - "8000:8000"   # HTTP inference API
+      - "8001:8001"   # gRPC inference API
+      - "8002:8002"   # Prometheus metrics
     volumes:
       - ./model_repository:/models
     command: ["tritonserver", "--model-repository=/models"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # FastAPI wrapper — handles vocab, dot product, top-k, response formatting
+  fastapi_wrapper:
+    build:
+      context: ../../
+      dockerfile: serving/triton_cpu/Dockerfile.wrapper
+    container_name: fastapi_wrapper
+    ports:
+      - "8080:8080"
+    environment:
+      - TRITON_URL=triton_server:8000
+      - VOCAB_PATH=/app/artifacts/vocabs.pkl
+      - MODEL_ARTIFACT_PATH=/app/artifacts/best_gru4rec.pt
+      - DEVICE=cpu
+    volumes:
+      - ../../artifacts:/app/artifacts:ro
+    depends_on:
+      - triton_server
+
+  # Jupyter container for benchmarking (like the lab)
+  jupyter:
+    image: python:3.11-slim
+    container_name: jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/work
+    command: >
+      bash -c "pip install -q jupyter numpy requests tritonclient[http] &&
+               jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --notebook-dir=/work"
+    depends_on:
+      - triton_server
