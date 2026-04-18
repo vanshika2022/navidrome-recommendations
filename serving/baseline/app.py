@@ -345,3 +345,115 @@ def recommend(request: RecommendRequest, http_request: Request):
         REQUESTS.labels(status="500").inc()
         log.exception(f"request_id={request_id} inference_failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
+
+
+# ─── track-ID-based endpoint (for Navidrome integration) ────────────────
+class TrackRecommendRequest(BaseModel):
+    """Simpler input schema for callers that only know track IDs.
+    The vocab translation (track_id → item_idx) happens server-side."""
+
+    session_id:         str = "unknown"
+    user_id:            int | str = 0
+    track_ids:          list[str] = Field(min_length=1, max_length=MAX_PREFIX_LEN)
+    exclude_track_ids:  list[str] = Field(default_factory=list)
+    top_n:              int = Field(default=20, ge=1, le=MAX_TOP_N)
+
+
+@app.post("/recommend-by-tracks", response_model=RecommendResponse)
+def recommend_by_tracks(request: TrackRecommendRequest, http_request: Request):
+    """Accept raw 30Music track IDs, translate to vocab indices internally,
+    run inference, and return recommendations as track IDs.
+
+    This is the endpoint Navidrome (or any frontend) should call —
+    no need to know about vocab indices.
+    """
+    request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
+    t_start = time.time()
+
+    log.info(
+        f"request_id={request_id} session_id={request.session_id} "
+        f"user_hash={_hash_user(request.user_id)} "
+        f"num_tracks={len(request.track_ids)} top_n={request.top_n}"
+    )
+
+    try:
+        with LATENCY.time():
+            model        = state["model"]
+            all_item_emb = state["all_item_emb"]
+            item2idx     = state["item2idx"]
+            idx2item     = state["idx2item"]
+
+            # Translate track IDs → vocab indices, skip unknown tracks
+            clean_prefix = []
+            oov_count = 0
+            for tid in request.track_ids:
+                # item2idx keys are numpy int64, so try int conversion
+                try:
+                    key = int(tid)
+                except (ValueError, TypeError):
+                    key = tid
+                if key in item2idx:
+                    clean_prefix.append(item2idx[key])
+                else:
+                    oov_count += 1
+
+            if oov_count:
+                OOV_ITEMS.inc(oov_count)
+                log.warning(f"request_id={request_id} unknown_tracks={oov_count}")
+
+            if not clean_prefix:
+                REQUESTS.labels(status="400").inc()
+                raise HTTPException(
+                    status_code=400,
+                    detail="None of the provided track_ids exist in the model vocabulary.",
+                )
+
+            # Translate exclude track IDs too
+            exclude = set()
+            for tid in request.exclude_track_ids:
+                try:
+                    key = int(tid)
+                except (ValueError, TypeError):
+                    key = tid
+                if key in item2idx:
+                    exclude.add(item2idx[key])
+
+            prefix_tensor = torch.tensor([clean_prefix], dtype=torch.long, device=DEVICE)
+            user_tensor   = torch.tensor([0], dtype=torch.long, device=DEVICE)
+
+            indices, scores = model.predict_top_n(
+                prefix_items=prefix_tensor,
+                user_idxs=user_tensor,
+                all_item_emb=all_item_emb,
+                top_n=request.top_n,
+                exclude_sets=[exclude],
+            )
+
+        recs = [
+            Recommendation(
+                rank=rank,
+                item_idx=idx,
+                track_id=idx2item.get(idx, f"unknown_{idx}"),
+                score=score,
+            )
+            for rank, (idx, score) in enumerate(zip(indices[0], scores[0]), start=1)
+        ]
+
+        REQUESTS.labels(status="200").inc()
+        latency_ms = (time.time() - t_start) * 1000
+        return RecommendResponse(
+            session_id=request.session_id,
+            request_id=request_id,
+            recommendations=recs,
+            model_version=MODEL_VERSION,
+            generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            inference_latency_ms=round(latency_ms, 2),
+            oov_count=oov_count,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        REQUESTS.labels(status="500").inc()
+        log.exception(f"request_id={request_id} inference_failed: {e}")
+        raise HTTPException(status_code=500, detail="internal error")
