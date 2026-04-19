@@ -47,6 +47,7 @@ if str(_SERVING_ROOT) not in sys.path:
     sys.path.insert(0, str(_SERVING_ROOT))
 
 from _shared.model import DEFAULT_CFG, DEFAULT_NUM_ITEMS, load_model  # noqa: E402
+from _shared.cold_start import ColdStartBlender  # noqa: E402
 
 
 # ─── configuration ───────────────────────────────────────────────────────
@@ -61,13 +62,29 @@ VOCAB_PATH     = os.environ.get(
 MODEL_VERSION  = os.environ.get("MODEL_VERSION", "best_gru4rec")
 
 # MLflow: if set, pull model artifact from MLflow instead of local file.
-# Set MLFLOW_TRACKING_URI to enable (e.g. http://129.114.27.204:8000).
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "")
 MLFLOW_EXPERIMENT   = os.environ.get("MLFLOW_EXPERIMENT", "30music-session-recommendation")
 MLFLOW_ARTIFACT     = os.environ.get("MLFLOW_ARTIFACT", "best_gru4rec.pt")
-DEVICE         = os.environ.get("DEVICE", "cpu")
-MAX_PREFIX_LEN = int(os.environ.get("MAX_PREFIX_LEN", "200"))
-MAX_TOP_N      = int(os.environ.get("MAX_TOP_N", "100"))
+
+# MinIO: if MINIO_URL is set, pull latest model from MinIO at startup.
+# MINIO_MODEL_KEY overrides auto-discovery (e.g. "finetune/2026-04-19/abc/model.pt").
+# MINIO_MODEL_RUN_TYPE controls which run type to search: "finetune" (default) or "pretrain".
+MINIO_URL           = os.environ.get("MINIO_URL", "")
+MINIO_USER          = os.environ.get("MINIO_USER", "")
+MINIO_PASSWORD      = os.environ.get("MINIO_PASSWORD", "")
+MINIO_MODEL_KEY     = os.environ.get("MINIO_MODEL_KEY", "")
+MINIO_MODEL_RUN_TYPE = os.environ.get("MINIO_MODEL_RUN_TYPE", "finetune")
+DEVICE              = os.environ.get("DEVICE", "cpu")
+MAX_PREFIX_LEN      = int(os.environ.get("MAX_PREFIX_LEN", "200"))
+MAX_TOP_N           = int(os.environ.get("MAX_TOP_N", "100"))
+POPULARITY_PATH         = os.environ.get(
+    "POPULARITY_PATH",
+    str(_SERVING_ROOT.parent / "artifacts" / "popularity.npy"),
+)
+COLD_START_RAMP         = int(os.environ.get("COLD_START_RAMP", "3"))
+# MinIO coords for popularity — set MINIO_URL/USER/PASSWORD + this key to pull at startup
+MINIO_POPULARITY_KEY    = os.environ.get("MINIO_POPULARITY_KEY", "")
+MINIO_BUCKET            = os.environ.get("MINIO_BUCKET", "gru4rec-models")
 
 
 # ─── logging (PII-safe) ──────────────────────────────────────────────────
@@ -108,6 +125,10 @@ MODEL_INFO = Gauge(
     "Metadata about the loaded model. Value is always 1; labels carry the info.",
     ["model_version", "num_items", "embedding_dim"],
 )
+COLD_START_ACTIVATIONS = Counter(
+    "recommend_cold_start_activations_total",
+    "Requests where cold-start blending was applied (alpha < 1.0).",
+)
 
 
 # ─── request / response schema (matches samples/input_sample.json) ───────
@@ -142,6 +163,7 @@ class RecommendResponse(BaseModel):
     generated_at:          str
     inference_latency_ms:  float
     oov_count:             int
+    cold_start_alpha:      float   # 0.0 = pure popularity, 1.0 = pure GRU4Rec
 
 
 # ─── app state (populated on startup) ────────────────────────────────────
@@ -209,6 +231,59 @@ def _fetch_model_from_mlflow() -> str:
     return str(local_path)
 
 
+def _fetch_model_from_minio() -> str:
+    """Download latest finetune (or pretrain) model.pt from MinIO.
+
+    Uses MINIO_MODEL_KEY if set explicitly, otherwise auto-discovers the
+    most recently uploaded model under MINIO_MODEL_RUN_TYPE/.
+    Returns local path to the downloaded file.
+    """
+    import boto3
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=MINIO_URL,
+        aws_access_key_id=MINIO_USER,
+        aws_secret_access_key=MINIO_PASSWORD,
+        region_name="us-east-1",
+    )
+    bucket = MINIO_BUCKET
+
+    key = MINIO_MODEL_KEY
+    if not key:
+        # auto-discover latest model
+        paginator = s3.get_paginator("list_objects_v2")
+        best_key, best_ts = None, None
+
+        for run_type in [MINIO_MODEL_RUN_TYPE, "pretrain"]:
+            for page in paginator.paginate(Bucket=bucket, Prefix=f"{run_type}/"):
+                for obj in page.get("Contents", []):
+                    if obj["Key"].endswith("/model.pt"):
+                        if best_ts is None or obj["LastModified"] > best_ts:
+                            best_key = obj["Key"]
+                            best_ts  = obj["LastModified"]
+            if best_key:
+                break
+
+        if not best_key:
+            raise RuntimeError(f"No model.pt found in MinIO bucket '{bucket}'")
+        key = best_key
+
+    log.info(f"Downloading model from MinIO: s3://{bucket}/{key}")
+    cache_dir = Path("/tmp/minio_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    local_path = cache_dir / key.replace("/", "_")
+
+    if local_path.exists():
+        log.info(f"Using cached model: {local_path}")
+        return str(local_path)
+
+    with open(local_path, "wb") as fh:
+        s3.download_fileobj(bucket, key, fh)
+    log.info(f"Downloaded model ({local_path.stat().st_size / 1e6:.1f} MB) → {local_path}")
+    return str(local_path)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load vocab (item2idx, user2idx) from Yesha's training cache.
@@ -220,9 +295,11 @@ async def lifespan(app: FastAPI):
     state["idx2item"] = idx2item
     log.info(f"Vocab loaded: {len(item2idx)} items, {len(user2idx)} users")
 
-    # Load model: from MLflow if configured, otherwise from local file.
+    # Load model: MinIO > MLflow > local file.
     model_path = MODEL_PATH
-    if MLFLOW_TRACKING_URI:
+    if MINIO_URL:
+        model_path = _fetch_model_from_minio()
+    elif MLFLOW_TRACKING_URI:
         model_path = _fetch_model_from_mlflow()
 
     log.info(f"Loading model from {model_path} on device={DEVICE} ...")
@@ -234,6 +311,33 @@ async def lifespan(app: FastAPI):
     state["all_item_emb"] = all_item_emb
     state["num_items"]    = all_item_emb.shape[0]
     state["embed_dim"]    = all_item_emb.shape[1]
+
+    # Cold-start blender — fetch popularity.npy from MinIO if not already local
+    if not Path(POPULARITY_PATH).exists() and MINIO_POPULARITY_KEY:
+        log.info(f"Fetching popularity.npy from MinIO (key={MINIO_POPULARITY_KEY}) ...")
+        try:
+            import boto3
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=os.environ["MINIO_URL"],
+                aws_access_key_id=os.environ["MINIO_USER"],
+                aws_secret_access_key=os.environ["MINIO_PASSWORD"],
+                region_name="us-east-1",
+            )
+            Path(POPULARITY_PATH).parent.mkdir(parents=True, exist_ok=True)
+            with open(POPULARITY_PATH, "wb") as fh:
+                s3.download_fileobj(MINIO_BUCKET, MINIO_POPULARITY_KEY, fh)
+            log.info(f"Downloaded popularity.npy → {POPULARITY_PATH}")
+        except Exception as e:
+            log.warning(f"MinIO popularity download failed: {e} — cold-start disabled.")
+
+    if Path(POPULARITY_PATH).exists():
+        log.info(f"Loading popularity scores from {POPULARITY_PATH} (ramp={COLD_START_RAMP}) ...")
+        state["cold_start"] = ColdStartBlender.from_file(POPULARITY_PATH, ramp_sessions=COLD_START_RAMP)
+        log.info("Cold-start blender ready.")
+    else:
+        state["cold_start"] = None
+        log.warning(f"popularity.npy not found at {POPULARITY_PATH} — cold-start disabled.")
 
     MODEL_INFO.labels(
         model_version=MODEL_VERSION,
@@ -308,13 +412,30 @@ def recommend(request: RecommendRequest, http_request: Request):
             prefix_tensor = torch.tensor([clean_prefix], dtype=torch.long, device=DEVICE)
             user_tensor   = torch.tensor([request.user_idx], dtype=torch.long, device=DEVICE)
 
-            indices, scores = model.predict_top_n(
-                prefix_items=prefix_tensor,
-                user_idxs=user_tensor,
-                all_item_emb=all_item_emb,
-                top_n=request.top_n,
-                exclude_sets=[set(exclude)],
-            )
+            blender = state["cold_start"]
+            if blender is not None:
+                indices, scores, alphas = blender.predict(
+                    model=model,
+                    prefix_items=prefix_tensor,
+                    user_idxs=user_tensor,
+                    all_item_emb=all_item_emb,
+                    top_n=request.top_n,
+                    exclude_sets=[set(exclude)],
+                )
+                cs_alpha = alphas[0]
+            else:
+                indices, scores = model.predict_top_n(
+                    prefix_items=prefix_tensor,
+                    user_idxs=user_tensor,
+                    all_item_emb=all_item_emb,
+                    top_n=request.top_n,
+                    exclude_sets=[set(exclude)],
+                )
+                cs_alpha = 1.0
+
+        if cs_alpha < 1.0:
+            COLD_START_ACTIVATIONS.inc()
+        log.info(f"request_id={request_id} cold_start_alpha={cs_alpha}")
 
         # 5) translate predicted integer indices → track id strings.
         recs = [
@@ -337,6 +458,7 @@ def recommend(request: RecommendRequest, http_request: Request):
             generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             inference_latency_ms=round(latency_ms, 2),
             oov_count=oov_count,
+            cold_start_alpha=cs_alpha,
         )
 
     except HTTPException:
@@ -421,13 +543,30 @@ def recommend_by_tracks(request: TrackRecommendRequest, http_request: Request):
             prefix_tensor = torch.tensor([clean_prefix], dtype=torch.long, device=DEVICE)
             user_tensor   = torch.tensor([0], dtype=torch.long, device=DEVICE)
 
-            indices, scores = model.predict_top_n(
-                prefix_items=prefix_tensor,
-                user_idxs=user_tensor,
-                all_item_emb=all_item_emb,
-                top_n=request.top_n,
-                exclude_sets=[exclude],
-            )
+            blender = state["cold_start"]
+            if blender is not None:
+                indices, scores, alphas = blender.predict(
+                    model=model,
+                    prefix_items=prefix_tensor,
+                    user_idxs=user_tensor,
+                    all_item_emb=all_item_emb,
+                    top_n=request.top_n,
+                    exclude_sets=[exclude],
+                )
+                cs_alpha = alphas[0]
+            else:
+                indices, scores = model.predict_top_n(
+                    prefix_items=prefix_tensor,
+                    user_idxs=user_tensor,
+                    all_item_emb=all_item_emb,
+                    top_n=request.top_n,
+                    exclude_sets=[exclude],
+                )
+                cs_alpha = 1.0
+
+        if cs_alpha < 1.0:
+            COLD_START_ACTIVATIONS.inc()
+        log.info(f"request_id={request_id} cold_start_alpha={cs_alpha}")
 
         recs = [
             Recommendation(
@@ -449,6 +588,7 @@ def recommend_by_tracks(request: TrackRecommendRequest, http_request: Request):
             generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             inference_latency_ms=round(latency_ms, 2),
             oov_count=oov_count,
+            cold_start_alpha=cs_alpha,
         )
 
     except HTTPException:
