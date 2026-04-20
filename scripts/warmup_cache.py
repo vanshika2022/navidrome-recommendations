@@ -85,13 +85,24 @@ class Config:
 
 # ─── swift helpers ───────────────────────────────────────────────────────
 def make_s3(cfg: Config):
-    return boto3.client(
+    client = boto3.client(
         "s3",
         endpoint_url=cfg.endpoint,
         aws_access_key_id=cfg.access_key,
         aws_secret_access_key=cfg.secret_key,
         region_name="us-east-1",
     )
+    # Ensure audio-cache bucket exists so Hashir doesn't have to create it
+    # manually. Safe no-op if it's already there.
+    try:
+        client.head_bucket(Bucket=cfg.audio_bucket)
+    except Exception:
+        try:
+            client.create_bucket(Bucket=cfg.audio_bucket)
+            log.info(f"Created Swift bucket '{cfg.audio_bucket}'")
+        except Exception as e:
+            log.warning(f"Could not create bucket '{cfg.audio_bucket}': {e}")
+    return client
 
 
 def audio_key(cfg: Config, track_id: str) -> str:
