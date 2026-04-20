@@ -738,78 +738,49 @@ def _audio_cached(s3, track_id: str) -> bool:
         return False
 
 
-def _fetch_audio_from_youtube(title: str, artist: str) -> bytes:
-    """Run yt-dlp, return mp3 bytes. Raises on failure."""
-    query = f"ytsearch1:{title} {artist}".strip()
-    with tempfile.TemporaryDirectory() as td:
-        out_template = str(Path(td) / "audio.%(ext)s")
-        subprocess.run(
-            [
-                "yt-dlp", "--no-playlist", "--quiet", "--no-warnings",
-                "-x", "--audio-format", "mp3", "--audio-quality", "5",
-                "-o", out_template,
-                query,
-            ],
-            check=True,
-            capture_output=True,
-            timeout=AUDIO_DOWNLOAD_TIMEOUT,
+def _list_audio_keys(s3, max_keys: int = 1000) -> list[str]:
+    """List up to max_keys audio object keys from the bucket."""
+    try:
+        resp = s3.list_objects_v2(
+            Bucket=AUDIO_BUCKET, Prefix=AUDIO_KEY_PREFIX, MaxKeys=max_keys
         )
-        mp3_files = list(Path(td).glob("*.mp3"))
-        if not mp3_files:
-            raise RuntimeError("yt-dlp produced no mp3")
-        return mp3_files[0].read_bytes()
+        return [obj["Key"] for obj in resp.get("Contents", [])]
+    except Exception as e:
+        log.warning(f"audio bucket list failed: {e}")
+        return []
 
 
 @app.get("/play/{track_id}")
 def play(track_id: str):
     """Redirect the browser to a presigned Swift URL for this track's audio.
 
-    Cache miss → yt-dlp ingest from public sources → upload to Swift → redirect.
-    Cache hit  → presign immediately.
+    Cache hit  → presigned URL for the track's own mp3.
+    Cache miss → presigned URL for a random mp3 in the bucket (demo fallback —
+                 the UI still shows the correct title/artist from track_dict,
+                 only the audio content is substituted).
     """
     s3 = _audio_s3_client()
     if s3 is None:
         raise HTTPException(status_code=503, detail="Audio storage not configured")
 
+    key = _audio_cache_key(track_id)
     if _audio_cached(s3, track_id):
         PLAY_CACHE_HITS.inc()
     else:
         PLAY_CACHE_MISSES.inc()
-        meta = _lookup_track_meta(track_id)
-        title  = meta.get("title", "").strip()
-        artist = meta.get("artist", "").strip()
-        if not title:
-            raise HTTPException(status_code=404, detail=f"No metadata for track_id={track_id}")
-
-        log.info(f"play cache-miss track_id={track_id} query='{title} — {artist}'")
-        t0 = time.time()
-        try:
-            audio_bytes = _fetch_audio_from_youtube(title, artist)
-        except subprocess.TimeoutExpired:
-            PLAY_DOWNLOAD_ERRORS.labels(reason="timeout").inc()
-            raise HTTPException(status_code=504, detail="Audio fetch timed out")
-        except subprocess.CalledProcessError as e:
-            PLAY_DOWNLOAD_ERRORS.labels(reason="yt_dlp_failed").inc()
-            stderr = e.stderr.decode(errors="ignore")[:200] if e.stderr else str(e)
-            log.warning(f"yt-dlp failed track_id={track_id}: {stderr}")
-            raise HTTPException(status_code=502, detail="Audio fetch failed")
-        except Exception as e:
-            PLAY_DOWNLOAD_ERRORS.labels(reason="other").inc()
-            log.exception(f"audio fetch error track_id={track_id}: {e}")
-            raise HTTPException(status_code=500, detail="Audio fetch error")
-        PLAY_DOWNLOAD_DURATION.observe(time.time() - t0)
-
-        s3.put_object(
-            Bucket=AUDIO_BUCKET,
-            Key=_audio_cache_key(track_id),
-            Body=audio_bytes,
-            ContentType="audio/mpeg",
-        )
-        log.info(f"play cached track_id={track_id} size={len(audio_bytes)/1e6:.1f}MB")
+        keys = _list_audio_keys(s3)
+        if not keys:
+            raise HTTPException(
+                status_code=404,
+                detail="No audio available in cache bucket",
+            )
+        import random as _random
+        key = _random.choice(keys)
+        log.info(f"play fallback track_id={track_id} -> {key}")
 
     url = s3.generate_presigned_url(
         "get_object",
-        Params={"Bucket": AUDIO_BUCKET, "Key": _audio_cache_key(track_id)},
+        Params={"Bucket": AUDIO_BUCKET, "Key": key},
         ExpiresIn=AUDIO_PRESIGN_TTL,
     )
     return RedirectResponse(url=url, status_code=302)
