@@ -1,16 +1,20 @@
 """
-Generate + upload audio metadata manifest to Chameleon Swift.
+Enrich Chameleon Swift audio objects with title/artist/track_id metadata.
 
-Reads track_dict.parquet from MinIO (S3 auth), lists the audio container
-on Chameleon Swift (Keystone auth), cross-references to find which
-track_ids actually have audio uploaded, then writes a JSON manifest with
-{track_id, title, artist, swift_path, size} and uploads it back to Swift
-at navidrome-bucket-proj05/audio/manifest.json.
+Two things happen here:
 
-Written so Salauat (or anyone with the Chameleon credentials) can run it
-on a machine with both cluster-internal MinIO access and Chameleon Swift
-access. The serving container + Navidrome don't depend on this file —
-it's purely for human inspection of what metadata the audio bucket has.
+  1. For each audio/<track_id>.mp3 in the Swift container, set Swift
+     object metadata (X-Object-Meta-Title, X-Object-Meta-Artist,
+     X-Object-Meta-Track-Id) pulled from track_dict.parquet on MinIO.
+     These headers show up in the Chameleon Object Details UI and are
+     queryable via `swift stat`. Done via POST — no re-upload of audio
+     bytes, so it runs fast (~2k objects in a minute or two).
+
+  2. Also write a human-readable manifest.json back to the bucket,
+     one entry per track, as a single-file view of the combined data.
+
+Reads track_dict.parquet from MinIO (S3 auth); writes to Chameleon Swift
+(Keystone auth). Run on any machine with both sets of credentials.
 
 Setup
 -----
@@ -40,12 +44,14 @@ import logging
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 import pyarrow.parquet as pq
 from keystoneauth1.identity.v3 import ApplicationCredential
 from keystoneauth1.session import Session
 from swiftclient.client import Connection as SwiftConnection
+from swiftclient.exceptions import ClientException
 
 
 log = logging.getLogger("manifest")
@@ -121,6 +127,34 @@ def list_swift_audio(swift: SwiftConnection, container: str, prefix: str) -> lis
     return entries
 
 
+def _sanitize_header(value: str) -> str:
+    """Swift metadata headers must be ISO-8859-1-encodable; coerce via URL-quote.
+
+    Swift servers vary in their Unicode handling. Safest is to strip anything
+    outside ASCII. For demo purposes the title/artist are usually ASCII
+    already; the occasional accented character drops but nothing breaks.
+    """
+    return value.encode("ascii", errors="ignore").decode("ascii").strip()
+
+
+def update_swift_metadata(swift: SwiftConnection, container: str, obj_name: str,
+                          track_id: str, title: str, artist: str) -> None:
+    """POST new metadata headers to an existing Swift object (no re-upload).
+
+    Any X-Object-Meta-* header sent REPLACES the set — so we send all three
+    in one call and don't have to worry about losing existing ones (there
+    aren't any interesting ones on raw mp3s in this bucket).
+    """
+    headers = {
+        "X-Object-Meta-Track-Id": _sanitize_header(track_id),
+    }
+    if title:
+        headers["X-Object-Meta-Title"] = _sanitize_header(title)
+    if artist:
+        headers["X-Object-Meta-Artist"] = _sanitize_header(artist)
+    swift.post_object(container=container, obj=obj_name, headers=headers)
+
+
 def build_manifest(entries: list[dict], track_dict: dict[str, dict],
                    container: str) -> dict:
     tracks: dict[str, dict] = {}
@@ -169,6 +203,10 @@ def main():
     p.add_argument("--swift-manifest-key", default="audio/manifest.json")
     p.add_argument("--minio-meta-bucket", default=os.environ.get("TRACK_META_BUCKET", "navidrome-metadata"))
     p.add_argument("--minio-meta-key",    default=os.environ.get("TRACK_META_KEY", "track_dict.parquet"))
+    p.add_argument("--concurrency", type=int, default=8,
+                   help="Parallel POSTs when writing object metadata.")
+    p.add_argument("--skip-object-metadata", action="store_true",
+                   help="Only write the manifest; don't touch per-object X-Object-Meta-* headers.")
     p.add_argument("--log-level", default="INFO")
     a = p.parse_args()
 
@@ -188,6 +226,37 @@ def main():
         f"Manifest: {manifest['track_count']} tracks, "
         f"{manifest['missing_metadata']} missing parquet metadata"
     )
+
+    # Update Swift object metadata in parallel: each audio/<id>.mp3 gets
+    # X-Object-Meta-{Title,Artist,Track-Id} set so it shows up in the
+    # Chameleon Object Details UI.
+    if not a.skip_object_metadata:
+        ok = 0
+        fail = 0
+
+        def _update(track_id, track_meta):
+            nonlocal ok, fail
+            try:
+                update_swift_metadata(
+                    swift,
+                    a.swift_container,
+                    track_meta["swift_object"],
+                    track_id=track_id,
+                    title=track_meta.get("title", ""),
+                    artist=track_meta.get("artist", ""),
+                )
+                ok += 1
+                if ok % 100 == 0:
+                    log.info(f"metadata updated: {ok}/{manifest['track_count']}")
+            except ClientException as e:
+                fail += 1
+                log.warning(f"meta update failed {track_meta['swift_object']}: {e}")
+
+        with ThreadPoolExecutor(max_workers=a.concurrency) as pool:
+            futs = [pool.submit(_update, tid, tm) for tid, tm in manifest["tracks"].items()]
+            for _ in as_completed(futs):
+                pass
+        log.info(f"Object metadata writes: ok={ok} fail={fail}")
 
     upload_manifest(swift, a.swift_container, a.swift_manifest_key, manifest)
     log.info("Done.")
