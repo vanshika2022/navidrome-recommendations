@@ -76,12 +76,30 @@ _TRACK_ID_RE = re.compile(r"([^/]+)\.mp3$", re.IGNORECASE)
 
 # ─── auth / clients ─────────────────────────────────────────────────────
 def make_swift() -> SwiftConnection:
-    auth = ApplicationCredential(
-        auth_url=os.environ["OS_AUTH_URL"],
-        application_credential_id=os.environ["OS_APPLICATION_CREDENTIAL_ID"],
-        application_credential_secret=os.environ["OS_APPLICATION_CREDENTIAL_SECRET"],
+    """Support the two auth styles Chameleon users commonly have.
+
+    1. Application credentials — long-lived, from Chameleon → API Access →
+       Download Application Credential. Preferred for scripting.
+    2. Pre-authed token — what `openrc` from the dashboard sets. Short
+       lifespan (hours) but zero config.
+    """
+    if os.environ.get("OS_APPLICATION_CREDENTIAL_ID"):
+        auth = ApplicationCredential(
+            auth_url=os.environ["OS_AUTH_URL"],
+            application_credential_id=os.environ["OS_APPLICATION_CREDENTIAL_ID"],
+            application_credential_secret=os.environ["OS_APPLICATION_CREDENTIAL_SECRET"],
+        )
+        return SwiftConnection(session=Session(auth=auth))
+    if os.environ.get("OS_STORAGE_URL") and os.environ.get("OS_AUTH_TOKEN"):
+        return SwiftConnection(
+            preauthurl=os.environ["OS_STORAGE_URL"],
+            preauthtoken=os.environ["OS_AUTH_TOKEN"],
+        )
+    raise SystemExit(
+        "No Chameleon Swift credentials found. Either:\n"
+        "  (a) export OS_APPLICATION_CREDENTIAL_ID + OS_APPLICATION_CREDENTIAL_SECRET + OS_AUTH_URL, or\n"
+        "  (b) source ~/openrc (sets OS_STORAGE_URL + OS_AUTH_TOKEN)."
     )
-    return SwiftConnection(session=Session(auth=auth))
 
 
 def make_minio_s3():
